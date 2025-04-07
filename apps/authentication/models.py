@@ -44,12 +44,22 @@ class UserAccountManager(BaseUserManager):
         user.is_superuser = True
         user.is_staff = True
         user.is_active = True
+        user.role = 'admin'
         user.save(using=self._db)
 
         return user
     
 
 class UserAccount(AbstractBaseUser, PermissionsMixin):
+
+    roles = (
+        ("admin", "Admin"),
+        ("moderator", "Moderator"),
+        ("helper", "Helper"),
+        ("editor", "Editor"),
+        ("customer", "Customer"),
+        ("seller", "Seller"),
+    )
 
     id = models.UUIDField(default=uuid.uuid4, unique=True, primary_key=True)
     email = models.EmailField(unique=True)
@@ -60,6 +70,9 @@ class UserAccount(AbstractBaseUser, PermissionsMixin):
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+
+    role = models.CharField(max_length=20, choices=roles, default="customer")
+    verified = models.BooleanField(default=False)
 
     is_active = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)

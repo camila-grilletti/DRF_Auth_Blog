@@ -4,9 +4,14 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
+from django.conf import settings
 from ckeditor.fields import RichTextField
 
 from .utils import get_client_ip
+
+
+User = settings.AUTH_USER_MODEL
+
 
 def blog_thumbnail_directory(instance, filename):
     return "thumbnails/blog/{0}/{1}".format(instance.title, filename)
@@ -86,6 +91,8 @@ class Post(models.Model):
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_post')
     
     title = models.CharField(max_length=128)
     description = models.CharField(max_length=256)
@@ -110,6 +117,29 @@ class Post(models.Model):
         return self.title
     
 
+class PostInteraction(models.Model):
+
+    INTERACTION_CHOICES = (
+        ('view', 'View'),
+        ('like', 'Like'),
+        ('comment', 'Comment'),
+        ('share', 'Share'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_post_interactions')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='post_interactions')
+    interaction_type = models.CharField(max_length=20, choices=INTERACTION_CHOICES)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'post', 'interaction_type')
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.user.username} {self.interaction_type} {self.post.title}"
+
+
 class PostView(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -122,11 +152,16 @@ class PostAnalytics(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     post = models.OneToOneField(Post, on_delete=models.CASCADE, related_name='post_analytics')
+
     views = models.PositiveIntegerField(default=0)
     impressions = models.PositiveIntegerField(default=0)
     clicks = models.PositiveIntegerField(default=0)
     click_through_rate = models.FloatField(default=0)
     avg_time_on_page = models.FloatField(default=0)
+
+    likes = models.PositiveIntegerField(default=0)
+    comments = models.PositiveIntegerField(default=0)
+    shares = models.PositiveIntegerField(default=0)
 
     def _update_click_through_rate(self):
         if self.impressions > 0:
@@ -151,6 +186,18 @@ class PostAnalytics(models.Model):
 
             self.views += 1
             self.save()
+
+    def increment_like(self):
+        self.likes += 1
+        self.save()
+
+    def increment_comment(self):
+        self.comments += 1
+        self.save()
+
+    def increment_share(self):
+        self.shares += 1
+        self.save()
 
 
 class Heading(models.Model):
