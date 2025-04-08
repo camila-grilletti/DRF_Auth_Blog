@@ -194,7 +194,7 @@ class PostInteraction(models.Model):
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_post_interactions')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_post_interactions', blank=True, null=True)
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='post_interactions')
     comment = models.ForeignKey(Comment, on_delete=models.SET_NULL, null=True, blank=True, related_name='interaction')
     interaction_type = models.CharField(max_length=20, choices=INTERACTION_CHOICES)
@@ -211,7 +211,8 @@ class PostInteraction(models.Model):
         ordering = ['-timestamp']
 
     def __str__(self):
-        return f"{self.user.username} {self.interaction_type} {self.post.title}"
+        username = self.user.username if self.user else 'Anonymous'
+        return f"{username} {self.interaction_type} {self.post.title}"
     
     def detect_anomalies(user, post):
         recent_interactions = PostInteraction.objects.filter(
@@ -236,8 +237,10 @@ class PostInteraction(models.Model):
         else:
             self.interaction_category = 'active'
 
-        self.hour_of_day = self.timestamp.hour
-        self.day_of_week = self.timestamp.weekday()
+        now = timezone.now()
+
+        self.hour_of_day = now.hour
+        self.day_of_week = now.weekday()
 
         super().save(*args, **kwargs)
 
@@ -280,22 +283,12 @@ class PostAnalytics(models.Model):
             self.click_through_rate = 0
         self.save()
 
-    def increment_click(self):
-        self.clicks += 1
-        self.save()
-        self._update_click_through_rate()
-
-    def increment_impressions(self):
-        self.impressions += 1
-        self.save()
-        self._update_click_through_rate()
-
-    def increment_view(self, ip_address):
-        if not PostView.objects.filter(post=self.post, ip_address=ip_address).exists():
-            PostView.objects.create(post=self.post, ip_address=ip_address)
-
-            self.views += 1
+    def increment_metric(self, metric_name):
+        if hasattr(self, metric_name):
+            setattr(self, metric_name, getattr(self, metric_name) + 1)
             self.save()
+        else:
+            raise ValueError(f'Metric {metric_name} does not exist in PostAnalytics')
 
     def increment_like(self):
         self.likes += 1
@@ -363,20 +356,6 @@ def create_comment_interaction(sender, instance, created, **kwargs):
 
         analytics, _ = PostAnalytics.objects.get_or_create(post=instance.post)
         analytics.increment_comment()
-
-
-@receiver(post_save, sender=PostView)
-def handle_post_view(sender, instance, created, **kwargs):
-    if created:
-        PostInteraction.objects.create(
-            user=instance.user,
-            post=instance.post,
-            interaction_type='view',
-            ip_address=instance.ip_address,
-        )
-
-        analytics, _ = PostAnalytics.objects.get_or_create(post=instance.post)
-        analytics.increment_view()
 
 
 @receiver(post_save, sender=PostLike)

@@ -94,7 +94,7 @@ class UserAccount(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = ['username', 'first_name', 'last_name']
 
     def __str__(self):
-        return self.email
+        return self.username
     
     def get_qr_code(self):
         if self.qr_code and hasattr(self.qr_code, "url"):

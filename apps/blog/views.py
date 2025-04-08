@@ -12,11 +12,11 @@ from django.core.cache import cache
 from django.db.models import Q, F, Prefetch
 from django.shortcuts import get_object_or_404
 
-from .models import Post, Heading, PostAnalytics, Category, CategoryAnalytics
+from .models import Post, Heading, PostAnalytics, Category, CategoryAnalytics, PostView, PostInteraction
 from .serializers import PostListSerializer, PostSerializer, HeadingSerializer, CategoryListSerializer
-from .tasks import increment_post_impressions
 from .utils import get_client_ip
 from .tasks import increment_post_views_tasks
+from apps.authentication.models import UserAccount
 
 from faker import Faker
 import random
@@ -116,22 +116,25 @@ class PostDetailView(StandardAPIView):
     def get(self, request):
         ip_address = get_client_ip(request)
         slug = request.query_params.get('slug')
+        user = request.user if request.user.is_authenticated else None
+
+        if not slug:
+            raise NotFound(detail='A valid slug muest be provided.')
         
         try:
-            cached_post = cache.get(f'post_detail:{slug}')
-            if cached_post:
-                increment_post_views_tasks.delay(cached_post['slug'], ip_address)
-                return self.response(cached_post)
-
-
             post = Post.postobjects.get(slug=slug)
-            serialized_post = PostSerializer(post).data
             
-            cache.set(f'post_detail:{slug}', serialized_post, timeout=60*5)
-
-            increment_post_views_tasks.delay(post.slug, ip_address)
-
-
+            cache_key = f'post_detail:{slug}'
+            cached_serialized_post = cache.get(cache_key)
+            
+            if cached_serialized_post:
+                serialized_post = cached_serialized_post
+            else:
+                serialized_post = PostSerializer(post).data
+                cache.set(cache_key, serialized_post, timeout=60*5)
+            
+            self._register_view_interaction(post, ip_address, user)
+            
         except Post.DoesNotExist:
             raise NotFound(detail='The requested post does not exist.')
         except Exception as e:
@@ -139,6 +142,22 @@ class PostDetailView(StandardAPIView):
 
         return self.response(serialized_post)
     
+    def _register_view_interaction(self, post, ip_address, user):
+        # Register view type interaction, increments unique and total views and updates PostAnalytics
+
+        if not PostView.objects.filter(post=post, ip_address=ip_address, user=user).exists():
+            PostView.objects.create(post=post, ip_address=ip_address, user=user)
+
+            PostInteraction.objects.create(
+                user=user,
+                post=post,
+                interaction_type='view',
+                ip_address=ip_address,
+            )
+
+            analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+            analytics.increment_metric('views')
+
 
 class PostHeadingView(StandardAPIView):
     permission_classes = [HasValidAPIKey]
@@ -321,8 +340,10 @@ class GenerateFakePostsView(StandardAPIView):
 
         for _ in range(posts_to_generate):
             title = fake.sentence(nb_words=6)
+            user = UserAccount.objects.get(username='testeditor')
             post = Post(
                 id=uuid.uuid4(),
+                user=user,
                 title=title,
                 description=fake.sentence(nb_words=12),
                 content=fake.paragraph(nb_sentences=4),

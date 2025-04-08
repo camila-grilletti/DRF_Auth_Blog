@@ -1,6 +1,17 @@
 from django.contrib import admin
 
-from .models import Category, Post, Heading, PostAnalytics, CategoryAnalytics, PostInteraction
+from .models import (
+    Category,
+    Post,
+    Heading,
+    PostAnalytics,
+    CategoryAnalytics,
+    PostInteraction,
+    Comment,
+    PostLike,
+    PostShare,
+    PostView,
+)
 
 
 @admin.register(Category)
@@ -86,3 +97,9 @@ class PostInteractionAdmin(admin.ModelAdmin):
         return obj.post.title
     
     post_title.short_description = 'Post Title'
+
+
+admin.site.register(PostLike)
+admin.site.register(PostView)
+admin.site.register(PostShare)
+admin.site.register(Comment)
