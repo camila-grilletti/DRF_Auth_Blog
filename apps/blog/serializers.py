@@ -68,6 +68,9 @@ class PostViewSerializer(serializers.ModelSerializer):
 class PostSerializer(serializers.ModelSerializer):    
     category = CategorySerializer() 
     headings = HeadingSerializer(many=True) 
+    comments_count = serializers.SerializerMethodField()
+    likes_count = serializers.SerializerMethodField()
+    has_liked = serializers.SerializerMethodField()
     view_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -76,6 +79,20 @@ class PostSerializer(serializers.ModelSerializer):
 
     def get_view_count(self, obj):
         return obj.post_analytics.views if obj.post_analytics else 0
+    
+    def get_comments_count(self, obj):
+        return obj.post_comments.filter(parent=None, is_active=True).count()
+    
+    def get_likes_count(self, obj):
+        return obj.likes.filter().count()
+    
+    def get_has_liked(self, obj):
+        user = self.context.get('request').user
+
+        if user and user.is_authenticated:
+            return PostLike.objects.filter(post=obj, user=user).exists()
+        
+        return False
     
 
 class PostListSerializer(serializers.ModelSerializer):
@@ -150,10 +167,10 @@ class PostInteractionSerializer(serializers.Serializer):
         ]
 
 
-class CommentSerializer(serializers.Serializer):
+class CommentSerializer(serializers.ModelSerializer):
     user = serializers.StringRelatedField()
     post_title = serializers.SerializerMethodField()
-    replies = serializers.SerializerMethodField()
+    replies_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Comment
@@ -167,15 +184,14 @@ class CommentSerializer(serializers.Serializer):
             'created_at',
             'updated_at',
             'is_active',
-            'replies',
+            'replies_count',
         ]
 
     def get_post_title(self, obj):
         return obj.post.title
     
-    def get_replies(self, obj):
-        replies = obj.replies.filter(is_active=True)
-        return CommentSerializer(replies, many=True).data
+    def get_replies_count(self, obj):
+        return obj.replies.filter(is_active=True).count()
 
 
 class PostLikeSerializer(serializers.Serializer):

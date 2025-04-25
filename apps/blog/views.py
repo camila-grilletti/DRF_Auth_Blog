@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework_api.views import StandardAPIView
 from rest_framework import permissions
 from rest_framework.response import Response
-from rest_framework.exceptions import NotFound, APIException
+from rest_framework.exceptions import NotFound, APIException, ValidationError
 import redis
 from django.conf import settings
 from django.utils.decorators import method_decorator
@@ -12,11 +12,12 @@ from django.core.cache import cache
 from django.db.models import Q, F, Prefetch
 from django.shortcuts import get_object_or_404
 
-from .models import Post, Heading, PostAnalytics, Category, CategoryAnalytics, PostView, PostInteraction
-from .serializers import PostListSerializer, PostSerializer, HeadingSerializer, CategoryListSerializer
+from .models import Post, Heading, PostAnalytics, Category, CategoryAnalytics, PostView, PostInteraction, Comment, PostLike, PostShare
+from .serializers import PostListSerializer, PostSerializer, HeadingSerializer, CategoryListSerializer, CommentSerializer
 from .utils import get_client_ip
 from .tasks import increment_post_views_tasks
 from apps.authentication.models import UserAccount
+from utils.string_utils import sanitize_string, sanitize_html
 
 from faker import Faker
 import random
@@ -28,6 +29,166 @@ from core.permissions import HasValidAPIKey
 redis_client = redis.StrictRedis(host=settings.REDIS_HOST, port=6379, db=0)
 
 
+class PostAuthorViews(StandardAPIView):
+    permission_classes = [HasValidAPIKey, permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if user.role == 'customer':
+            return self.error('You do not have permissions to edit this post')
+
+        posts = Post.objects.filter(user=user)
+            
+        if not posts.exists():
+            raise NotFound(detail='No posts found.')
+
+        serialized_posts = PostListSerializer(posts, many=True).data
+
+        return self.paginate(request, serialized_posts)
+
+    def post(self, request):
+
+        user = request.user
+
+        if user.role == 'customer':
+            return self.error('You do not have permissions to edit this post')
+        
+        required_fields = ['title', 'content', 'slug', 'category']
+        missing_fields = [
+            field for field in required_fields if not request.data.get(field)
+        ]
+
+        if missing_fields:
+            return self.error(f"Missing required fields: {', '.join(missing_fields)}")
+        
+        title = sanitize_string(request.data.get('title', None))
+        description = sanitize_string(request.data.get('description', ""))
+        content = sanitize_html(request.data.get('content', None))
+        thumbnail = sanitize_string(request.data.get('thumbnail', None))
+        keywords = sanitize_string(request.data.get('keywords', ""))
+        slug = slugify(request.data.get('slug', None))
+        category_slug = slugify(request.data.get('category', None))
+
+        try:
+            category = Category.objects.get(slug=category_slug)
+        except Category.DoesNotExist:
+            return self.response_error(
+                f"Category '{category_slug}' does not exist.", status=400
+            )
+            
+        try:
+            post = Post.objects.create(
+                user=user,
+                title=title,
+                description=description,
+                content=content,
+                keywords=keywords,
+                slug=slug,
+                category=category,
+                thumbnail=thumbnail
+            )
+
+            headings = request.data.get("headings", [])
+            for heading_data in headings:
+                Heading.objects.create(
+                    post=post,
+                    title=heading_data.get('title'),
+                    slug=heading_data.get('slug'),
+                    level=heading_data.get('level'),
+                    order=heading_data.get('order')
+                )
+
+        except Exception as e:
+            return self.error(f"An error occurred: {str(e)}")
+        
+        return self.response(f"Post '{post.title}' created successfully. It will be shown in a few minutes.")
+    
+    def put(self, request):
+
+        user = request.user
+
+        if user.role == 'customer':
+            return self.error('You do not have permissions to edit this post')
+        
+        post_slug = request.data.get('post_slug', None)
+
+        if not post_slug:
+            raise NotFound(detail="Post slug must ve provided.")
+
+        try:
+            post = Post.objects.get(slug=post_slug, user=user)
+        except Post.DoesNotExist:
+            raise NotFound(f"Post {post_slug} does not exist.")
+        
+        title = sanitize_string(request.data.get('title', None))
+        post_status = sanitize_string(request.data.get('status', "draft"))
+        description = sanitize_string(request.data.get('description', None))
+        content = sanitize_html(request.data.get('content', None))
+        thumbnail = sanitize_string(request.data.get('thumbnail', None))
+        category_slug = slugify(request.data.get('category', post.category.slug))
+
+        if category_slug:
+            try:
+                category = Category.objects.get(slug=category_slug)
+                post.category = category
+
+            except Category.DoesNotExist:
+                return self.response_error(
+                    f"Category '{category_slug}' does not exist.", status=400
+                )
+
+        if title:
+            post.title = title
+
+        if description:
+            post.description = description
+
+        if content:   
+            post.content = content
+
+        if thumbnail:
+            post.thumbnail = thumbnail
+
+        post.status = post_status
+
+        headings = request.data.get("headings", [])
+        if headings:
+            post.headings.all().delete()
+
+            for heading_data in headings:
+                Heading.objects.create(
+                    post=post,
+                    title=heading_data.get('title'),
+                    level=heading_data.get('level'),
+                    order=heading_data.get('order')
+                )
+
+        post.save()
+
+        return self.response(f"Post {post.title} successfully updated. Changes will be shown in a few minutes.")
+    
+    def delete(self, request):
+        user = request.user
+
+        if user.role == 'customer':
+            return self.error('You do not have permissions to edit this post')
+        
+        post_slug = request.query_params.get('slug', None)
+
+        if not post_slug:
+            raise NotFound(detail="Post slug must ve provided.")
+
+        try:
+            post = Post.objects.get(slug=post_slug, user=user)
+        except Post.DoesNotExist:
+            raise NotFound(f"Post {post_slug} does not exist.")
+
+        post.delete()
+
+        return self.response(f"Post {post.title} successfully deleted.")
+
+
 class PostListView(StandardAPIView):
     permission_classes = [HasValidAPIKey]
 
@@ -36,10 +197,11 @@ class PostListView(StandardAPIView):
             search = request.query_params.get("search", "").strip()
             sorting = request.query_params.get("sorting", None)
             ordering = request.query_params.get("ordering", None)
+            author = request.query_params.get("author", None)
             categories = request.query_params.getlist("category", [])
             page = request.query_params.getlist("p", "1")
 
-            cache_key = f'post_list:{search}:{sorting}:{ordering}:{categories}:{page}'
+            cache_key = f'post_list:{search}:{sorting}:{ordering}:{author}:{categories}:{page}'
             cached_posts = cache.get(cache_key)
             
             if cached_posts:
@@ -64,6 +226,9 @@ class PostListView(StandardAPIView):
                     Q(keywords__icontains=search)
                 )
             
+            if author:
+                posts = posts.filter(user__username=author)
+
             if categories:
                 category_queries = Q()
                 for category in categories:
@@ -121,18 +286,25 @@ class PostDetailView(StandardAPIView):
         if not slug:
             raise NotFound(detail='A valid slug muest be provided.')
         
-        try:
-            post = Post.postobjects.get(slug=slug)
-            
+        try:            
             cache_key = f'post_detail:{slug}'
             cached_serialized_post = cache.get(cache_key)
             
             if cached_serialized_post:
-                serialized_post = cached_serialized_post
-            else:
-                serialized_post = PostSerializer(post).data
-                cache.set(cache_key, serialized_post, timeout=60*5)
+                serialized_post = PostSerializer(cached_serialized_post, context={'request': request}).data
+                self._register_view_interaction(cached_serialized_post, ip_address, user)
+                return self.response(serialized_post)
             
+            try:
+                post = Post.postobjects.get(slug=slug)
+            except Post.DoesNotExist:
+                raise NotFound(f"Post {slug} does not exist.")
+
+            serialized_post = PostSerializer(post, context={'request': request}).data
+
+            cache.set(cache_key, serialized_post, timeout=60*5)
+            cache.delete(cache_key)
+
             self._register_view_interaction(post, ip_address, user)
             
         except Post.DoesNotExist:
@@ -322,6 +494,361 @@ class IncrementCategoryClickView(StandardAPIView):
             'message': 'Click incremented successfully',
             'clicks': category_analytics.clicks
         })
+
+
+class ListPostCommentsView(StandardAPIView):
+    permission_classes = [HasValidAPIKey]
+
+    def get(self, request):
+        """ List comments of a post """
+
+        post_slug = request.query_params.get('slug', None)
+        page = request.query_params.get("p", "1")
+
+        if not post_slug:
+            raise NotFound(detail='A valid post slug must be provided.')
+
+        cache_key = f"post_comment:{post_slug}:{page}"
+        cached_comments = cache.get(cache_key)
+
+        if cached_comments:
+            return self.paginate(request, cached_comments)
+
+        try:
+            post = Post.objects.get(slug=post_slug)
+        except Post.DoesNotExist:
+            raise ValueError(f"Post: {post_slug} does not exist")
+        
+        comments = Comment.objects.filter(post=post)
+        serialized_comments = CommentSerializer(comments, many=True).data
+
+        cache_index_key = f"post_comments_cache_keys:{post_slug}"
+        cache_keys = cache.get(cache_index_key, [])
+        cache_keys.append(cache_key)
+
+        cache.set(cache_index_key, cache_keys, timeout=60*5)
+
+        cache.set(cache_key, serialized_comments, timeout=60*5)
+
+        return self.paginate(request, serialized_comments)
+
+
+class PostCommentViews(StandardAPIView):
+    permission_classes = [HasValidAPIKey, permissions.IsAuthenticated]
+
+    def post(self, request):
+
+        post_slug = request.data.get('slug', None)
+        user = request.user
+        ip_address = get_client_ip(request)
+        content = sanitize_html(request.data.get('content', None))
+
+        if not post_slug:
+            raise NotFound(detail='A valid post slug must be provided.')
+        
+        try:
+            post = Post.objects.get(slug=post_slug)
+        except Post.DoesNotExist:
+            raise NotFound(detail=f"Post: {post_slug} does not exist")
+        
+        comment = Comment.objects.create(
+            user=user,
+            post=post,
+            content=content,
+        )
+
+        self._invalidate_post_comments_cache(post_slug)
+
+        self._register_view_interaction(comment, post, ip_address, user)
+
+        return self.response(f"Comment created for post {post.title}")
+
+    def put(self, request):
+
+        comment_id = request.data.get('comment_id', None)
+        user = request.user
+        content = sanitize_html(request.data.get('content', None))
+
+        if not comment_id:
+            raise NotFound(detail='A valid comment id must be provided.')
+        
+        try:
+            comment = Comment.objects.get(id=comment_id, user=user)
+        except Comment.DoesNotExist:
+            raise ValueError(f"Comment with id: {comment_id} does not exist")
+        
+        comment.content = content
+        comment.save()
+
+        self._invalidate_post_comments_cache(comment.post.slug)
+
+        if comment.parent and comment.parent.replies.exist():
+            self._invalidate_comment_replies_cache(comment.parent.id)
+
+        return self.response('Comment content updated successfully.')
+
+    def delete(self, request):
+
+        comment_id = request.query_params.get('comment_id', None)
+
+        if not comment_id:
+            raise NotFound(detail='A valid comment id must be provided.')
+        
+        try:
+            comment = Comment.objects.get(id=comment_id, user=request.user)
+        except Comment.DoesNotExist:
+            raise NotFound(detail=f"Comment with id: {comment_id} does not exist")
+
+        post = comment.post
+        post_analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+
+        if comment.parent and comment.parent.replies.exist():
+            self._invalidate_comment_replies_cache(comment.parent.id)
+
+        comment.delete()
+
+        comments_count = Comment.objects.filter(post=post, is_active=True).count()
+
+        post_analytics.comments = comments_count
+        post_analytics.save()
+
+        self._invalidate_post_comments_cache(post.slug)
+
+        return self.response('Comment deleted successfully.')
+    
+    def _register_view_interaction(self, comment, post, ip_address, user):
+        # Register view type interaction, increments unique and total views and updates PostAnalytics
+
+        PostInteraction.objects.create(
+            user=user,
+            post=post,
+            interaction_type='comment',
+            comment=comment,
+            ip_address=ip_address,
+        )
+
+        analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+        analytics.increment_metric('comments')
+
+    def _invalidate_post_comments_cache(self, post_slug):
+        cache_index_key = f"post_comments_cache_keys:{post_slug}"
+        cache_keys = cache.get(cache_index_key, [])
+
+        for key in cache_keys:
+            cache.delete(key)
+
+        cache.delete(cache_index_key)
+
+    def _invalidate_comment_replies_cache(self, comment_id):
+        cache_index_key = f"comment_replies_cache_keys:{comment_id}"
+        cache_keys = cache.get(cache_index_key, [])
+
+        for key in cache_keys:
+            cache.delete(key)
+
+        cache.delete(cache_index_key)
+
+
+class ListCommentRepliesView(StandardAPIView):
+    permission_classes = [HasValidAPIKey]
+
+    def get(self, request):
+
+        comment_id = request.query_params.get("comment_id", None)
+        page = request.query_params.get("p", 1)
+
+        if not comment_id:
+            raise NotFound(detail='A valid comment id must be provided.')
+        
+        cache_key = f"comment_replies:{comment_id}:{page}"
+        cached_replies = cache.get(cache_key)
+
+        if cached_replies:
+            return self.paginate(request, cached_replies)
+        
+        try:
+            parent_comment = Comment.objects.get(id=comment_id)
+        except Comment.DoesNotExist:
+            raise NotFound(detail=f"Comment with id: {comment_id} does not exist")
+        
+        replies = parent_comment.replies.filter(is_active=True).order_by("-created_at")
+
+        serialized_replies = CommentSerializer(replies, many=True).data
+
+        self._register_comment_reply_cache_key(comment_id, cache_key)
+
+        cache.set(cache_key, serialized_replies, timeout=60*5)
+
+        return self.paginate(request, serialized_replies)
+    
+    def _register_comment_reply_cache_key(self, comment_id, cache_key):
+        cache_index_key = f"comment_replies_cache_keys:{comment_id}"
+        cache_keys = cache.get(cache_index_key, [])
+
+        if cache_key not in cache_keys:
+            cache_keys.append(cache_key)
+
+        cache.set(cache_index_key, cache_keys, timeout=60*5)
+
+
+class CommentReplyViews(StandardAPIView):
+    permission_classes = [HasValidAPIKey, permissions.IsAuthenticated]
+    
+    def post(self, request):
+
+        comment_id = request.data.get("comment_id")
+        user = request.user
+        ip_address = get_client_ip(request)
+        content = sanitize_html(request.data.get('content', None))
+
+        if not comment_id:
+            raise NotFound(detail='A valid comment id must be provided.')
+
+        try:
+            parent_comment = Comment.objects.get(id=comment_id)
+        except Comment.DoesNotExist:
+            raise NotFound(detail=f"Comment with id {comment_id} does not exist.")
+
+        comment = Comment.objects.create(
+            user=user,
+            post=parent_comment.post,
+            parent=parent_comment,
+            content=content,
+        )
+
+        self._invalidate_comment_replies_cache(comment_id)
+
+        self._register_view_interaction(comment, comment.post, ip_address, user)
+
+        return self.response("Comment reply created successfully")
+    
+    def _invalidate_comment_replies_cache(self, comment_id):
+        cache_index_key = f"comment_replies_cache_keys:{comment_id}"
+        cache_keys = cache.get(cache_index_key, [])
+
+        for key in cache_keys:
+            cache.delete(key)
+
+        cache.delete(cache_index_key)
+
+    def _register_view_interaction(self, comment, post, ip_address, user):
+        # Register view type interaction, increments unique and total views and updates PostAnalytics
+
+        PostInteraction.objects.create(
+            user=user,
+            post=post,
+            interaction_type='comment',
+            comment=comment,
+            ip_address=ip_address,
+        )
+
+        analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+        analytics.increment_metric('comments')
+
+
+class PostLikeViews(StandardAPIView):
+    permission_classes = [HasValidAPIKey, permissions.IsAuthenticated]
+
+    def post(self, request):
+
+        post_slug = request.data.get("slug", None)
+        user = request.user
+
+        ip_address = get_client_ip(request)
+
+        if not post_slug:
+            raise NotFound(detail='A valid post slug must be provided.')
+        
+        try:
+            post = Post.objects.get(slug=post_slug)
+        except Post.DoesNotExist:
+            raise NotFound(detail=f"Post: {post_slug} does not exist")
+        
+        if PostLike.objects.filter(post=post, user=user).exists():
+            raise ValidationError(detail="You have already liked this post.")
+        
+        PostLike.objects.create(post=post, user=user)
+
+        PostInteraction.objects.create(
+            user=user,
+            post=post,
+            interaction_type='like',
+            ip_address=ip_address,
+        )
+
+        analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+        analytics.increment_metric("likes")
+
+
+        return self.response(f"You have liked the post: {post.title}")
+    
+    def delete(self, request):
+
+        post_slug = request.query_params.get('slug', None)
+        user = request.user
+
+        if not post_slug:
+            raise NotFound(detail='A valid post slug must be provided.')
+        
+        try:
+            post = Post.objects.get(slug=post_slug)
+        except Post.DoesNotExist:
+            raise NotFound(detail=f"Post: {post_slug} does not exist")
+        
+        try:
+            like = PostLike.objects.get(post=post, user=user)
+        except PostLike.DoesNotExist:
+            raise ValidationError(detail=f"You have not liked this post.")
+        
+        like.delete()
+
+        analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+        analytics.likes = PostLike.objects.filter(post=post).count()
+        analytics.save()
+
+        return self.response(f"You have unliked the post: {post.title}")
+
+
+class PostShareView(StandardAPIView):
+    permission_classes = [HasValidAPIKey]
+
+    def post(self, request):
+
+        post_slug = request.data.get('slug', None)
+        platform = request.data.get('platform', 'other').lower()
+        user = request.user if request.user.is_authenticated else None
+        ip_address = get_client_ip(request)
+
+        if not post_slug:
+            raise NotFound(detail='A valid post slug must be provided')
+        
+        try:
+            post = Post.objects.get(slug=post_slug)
+        except Post.DoesNotExist:
+            raise NotFound(detail=f"Post: {post_slug} does not exist")
+        
+        valid_platforms = [choice[0] for choice in PostShare._meta.get_field('platform').choices]
+
+        if platform not in valid_platforms:
+            raise ValidationError(detail=f'Invalid platform. Valid options are: {', '.join(valid_platforms)}')
+        
+        PostShare.objects.create(
+            post=post,
+            user=user,
+            platform=platform
+        )
+
+        PostInteraction.objects.create(
+            user=user,
+            post=post,
+            interaction_type='share',
+            ip_address=ip_address
+        )
+        
+        analytics, _ = PostAnalytics.objects.get_or_create(post=post)
+        analytics.increment_metric('shares')
+
+        return self.response(f'Post {post.title} shared successfully on {platform.capitalize()}')
 
 
 class GenerateFakePostsView(StandardAPIView):

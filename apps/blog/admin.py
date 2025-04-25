@@ -102,4 +102,12 @@ class PostInteractionAdmin(admin.ModelAdmin):
 admin.site.register(PostLike)
 admin.site.register(PostView)
 admin.site.register(PostShare)
-admin.site.register(Comment)
+
+@admin.register(Comment)
+class CommentAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'post', 'created_at', 'is_active')
+    search_fields = ('user__username', 'post__title', 'content')
+    list_filter = ('is_active', 'created_at')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    ordering = ('-created_at',)
+    list_display_links = ('id', 'user')
