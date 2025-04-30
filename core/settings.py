@@ -33,6 +33,8 @@ VALID_API_KEYS = env.str('VALID_API_KEYS').split(',')
 DEBUG = True
 
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
+CORS_ORIGIN_WHITELIST = env.list("CORS_ORIGIN_WHITELIST")
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS")
 
 # Application definition
 DJANGO_APPS = [
@@ -51,6 +53,7 @@ PROJECTS_APPS = [
 ]
 
 THIRD_PARTY_APPS = [
+    'corsheaders',
     'rest_framework',
     'rest_framework_api',
     'channels',
